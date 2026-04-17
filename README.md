@@ -9,7 +9,7 @@ Transform BaZi (Four Pillars of Destiny) into a stock-style K-line chart — inp
 ## 安装 / Install
 
 ```bash
-npx skills add Ficere/lifeline-k
+npx skills add Ficere/lifeline-k-skill
 ```
 
 > 需要 Node.js。安装后 Agent 会自动发现并按需加载该技能。
@@ -22,7 +22,7 @@ npx skills add Ficere/lifeline-k
 **手动安装 / Manual install：**
 
 ```bash
-git clone https://github.com/Ficere/lifeline-k.git
+git clone https://github.com/Ficere/lifeline-k-skill.git
 # 将整个目录复制到你的 Agent 的 skills 目录下即可
 # Copy the directory to your agent's skills folder:
 #   Claude Code:  ~/.claude/skills/
