@@ -349,58 +349,81 @@ def get_liu_nian_gz(year):
 # 运势评分核心算法
 # ============================================================
 
-def calc_yearly_score(day_gan, da_yun_gz, liu_nian_gz, base_score=50):
-    """
-    计算某一年的运势分数 (0-100)。
+# ---- 六合六冲常量 ----
+LIU_HE = [frozenset(p) for p in [("子", "丑"), ("寅", "亥"), ("卯", "戌"),
+          ("辰", "酉"), ("巳", "申"), ("午", "未")]]
+LIU_CHONG = [frozenset(p) for p in [("子", "午"), ("丑", "未"), ("寅", "申"),
+             ("卯", "酉"), ("辰", "戌"), ("巳", "亥")]]
 
-    综合考量：
-    1. 大运天干与日主的十神关系
-    2. 大运地支对日主的长生状态
-    3. 流年天干与日主的十神关系
-    4. 流年地支对日主的长生状态
-    5. 大运与流年的天干交互
-    """
-    score = base_score
 
+def calc_da_yun_base(day_gan, da_yun_gz):
+    """
+    计算大运基准分（50为中轴）。
+    大运每10年变化一次，决定运势的主趋势方向。
+    """
+    dy_gan, dy_zhi = da_yun_gz[0], da_yun_gz[1]
+
+    # 大运天干十神 —— 主权重
+    dy_ss = get_shi_shen(day_gan, dy_gan)
+    score = SHI_SHEN_SCORE.get(dy_ss, 0) * 2.5
+
+    # 大运地支长生
+    dy_cs = get_chang_sheng_score(day_gan, dy_zhi)
+    score += (dy_cs - 5) * 1.8
+
+    return score  # 典型范围: -14 ~ +26.5
+
+
+def calc_liu_nian_ripple(day_gan, da_yun_gz, liu_nian_gz):
+    """
+    计算流年波动分（叠加在大运基准之上的短期涟漪）。
+    权重较低，产生年度波动但不覆盖大运方向。
+    """
     dy_gan, dy_zhi = da_yun_gz[0], da_yun_gz[1]
     ln_gan, ln_zhi = liu_nian_gz[0], liu_nian_gz[1]
 
-    # 1. 大运天干十神
-    dy_ss = get_shi_shen(day_gan, dy_gan)
-    score += SHI_SHEN_SCORE.get(dy_ss, 0) * 1.5
-
-    # 2. 大运地支长生
-    dy_cs = get_chang_sheng_score(day_gan, dy_zhi)
-    score += (dy_cs - 5) * 1.2  # 基准5，偏离加减
-
-    # 3. 流年天干十神
+    # 流年天干十神 —— 降低权重
     ln_ss = get_shi_shen(day_gan, ln_gan)
-    score += SHI_SHEN_SCORE.get(ln_ss, 0) * 2.0
+    ripple = SHI_SHEN_SCORE.get(ln_ss, 0) * 0.8
 
-    # 4. 流年地支长生
+    # 流年地支长生 —— 降低权重
     ln_cs = get_chang_sheng_score(day_gan, ln_zhi)
-    score += (ln_cs - 5) * 1.5
+    ripple += (ln_cs - 5) * 0.6
 
-    # 5. 大运与流年天干的交互
+    # 大运与流年天干的交互（适度加分）
     dy_ln_ss = get_shi_shen(dy_gan, ln_gan)
     if dy_ln_ss in ("正财", "偏财", "正官", "食神"):
-        score += 3
+        ripple += 2
     elif dy_ln_ss in ("偏官", "劫财", "伤官"):
-        score -= 3
+        ripple -= 2
 
-    # 6. 地支六合/六冲
+    # 地支六合/六冲
     zhi_pair = frozenset([dy_zhi, ln_zhi])
-    liu_he = [frozenset(p) for p in [("子", "丑"), ("寅", "亥"), ("卯", "戌"),
-              ("辰", "酉"), ("巳", "申"), ("午", "未")]]
-    liu_chong = [frozenset(p) for p in [("子", "午"), ("丑", "未"), ("寅", "申"),
-                 ("卯", "酉"), ("辰", "戌"), ("巳", "亥")]]
+    if zhi_pair in LIU_HE:
+        ripple += 2.5
+    elif zhi_pair in LIU_CHONG:
+        ripple -= 3
 
-    if zhi_pair in liu_he:
-        score += 4
-    elif zhi_pair in liu_chong:
-        score -= 5
+    # 流年地支与命局地支交互（冲日支/合日支也有影响）
+    # 这里简化为流年地支与大运地支的关系
 
-    # 钳制到 5-95 范围（留 headroom 给 OHLC 浮动）
+    return ripple  # 典型范围: -8.6 ~ +10.3
+
+
+def calc_yearly_score(day_gan, da_yun_gz, liu_nian_gz, base_score=50):
+    """
+    计算某一年的运势原始分 (0-100)。
+
+    v3.0 两层结构：
+    - 大运基准（慢变，决定10年趋势方向）
+    - 流年涟漪（快变，产生年度波动但幅度受限）
+    """
+    da_yun_base = calc_da_yun_base(day_gan, da_yun_gz)
+    liu_nian_ripple = calc_liu_nian_ripple(day_gan, da_yun_gz, liu_nian_gz)
+
+    score = base_score + da_yun_base + liu_nian_ripple
+
+    # 钳制到 5-95 范围
     return max(5, min(95, score))
 
 
@@ -426,18 +449,16 @@ def generate_timeline(bazi, gender, birth_year, years=100):
     else:
         start_age = 5
 
-    timeline = []
-    prev_close = 50  # 初始价格
+    # ---- 第一轮：计算每年原始分 + 大运信息 ----
+    raw_scores = []
+    da_yun_info = []
 
     for i in range(years):
         year = birth_year + i
-        age = i + 1  # 虚岁
-
+        age = i + 1
         liu_nian_gz = get_liu_nian_gz(year)
 
-        # 确定当前大运
         if age < start_age:
-            # 未起运，用月柱代替大运
             current_dy = month_gz
         else:
             dy_idx = (age - start_age) // 10
@@ -445,30 +466,52 @@ def generate_timeline(bazi, gender, birth_year, years=100):
                 dy_idx = len(da_yun_list) - 1
             current_dy = da_yun_list[dy_idx]
 
-        # 计算基准分
-        base = calc_yearly_score(day_gan, current_dy, liu_nian_gz, base_score=50)
+        raw = calc_yearly_score(day_gan, current_dy, liu_nian_gz, base_score=50)
+        raw_scores.append(raw)
+        da_yun_info.append((year, age, current_dy, liu_nian_gz))
 
-        # 生成OHLC
+    # ---- 第二轮：EMA 平滑，产生有明显波段的价格曲线 ----
+    # EMA 平滑因子 α：越小越平滑，0.35 让大运趋势明显但流年仍有感知
+    alpha = 0.35
+    smoothed = [raw_scores[0]]
+    for i in range(1, len(raw_scores)):
+        s = alpha * raw_scores[i] + (1 - alpha) * smoothed[i - 1]
+        smoothed.append(max(5, min(95, s)))
+
+    # ---- 第三轮：大运交接过渡（大运切换时加速过渡）----
+    for i in range(1, len(smoothed)):
+        _, age, cur_dy, _ = da_yun_info[i]
+        _, _, prev_dy, _ = da_yun_info[i - 1]
+        if cur_dy != prev_dy:
+            # 大运切换的第一年，加大 α 使过渡更明显
+            transition_alpha = 0.55
+            smoothed[i] = transition_alpha * raw_scores[i] + (1 - transition_alpha) * smoothed[i - 1]
+            smoothed[i] = max(5, min(95, smoothed[i]))
+
+    # ---- 第四轮：生成 OHLC ----
+    timeline = []
+    prev_close = 50
+
+    for i in range(years):
+        year, age, current_dy, liu_nian_gz = da_yun_info[i]
+
         open_val = prev_close
-        close_val = base
+        close_val = smoothed[i]
 
-        # 波动范围（年龄因素：中年波动大，老年平稳）
-        volatility = 5 + 8 * math.sin(age / 30 * math.pi) * (0.5 + 0.5 * abs(close_val - 50) / 50)
-        volatility = max(3, volatility)
+        # 波动率：基于当年原始分与平滑分的差异 + 年龄因子
+        raw_dev = abs(raw_scores[i] - smoothed[i])
+        age_factor = 0.6 + 0.4 * math.sin(max(0, age - 5) / 30 * math.pi)
+        volatility = max(2, 2 + raw_dev * 0.5 * age_factor)
 
         high_val = max(open_val, close_val) + abs(hash(f"{year}_h") % int(volatility + 1))
         low_val = min(open_val, close_val) - abs(hash(f"{year}_l") % int(volatility + 1))
 
-        # 钳制
         high_val = min(100, max(high_val, max(open_val, close_val)))
         low_val = max(0, min(low_val, min(open_val, close_val)))
         open_val = max(0, min(100, open_val))
         close_val = max(0, min(100, close_val))
 
-        # 判断牛/熊
         trend = "牛" if close_val >= open_val else "熊"
-
-        # 大运周期标记
         dy_period = f"大运{current_dy}" if age >= start_age else "未起运"
 
         timeline.append({
@@ -492,6 +535,341 @@ def generate_timeline(bazi, gender, birth_year, years=100):
         timeline[peak_idx]["is_peak"] = True
 
     return timeline
+
+
+# ============================================================
+# 多维度评分体系（基于十神/长生/大运的八大维度）
+# ============================================================
+
+# 各维度对应的十神权重映射（正分=利好，负分=不利）
+# 基于传统命理十神六亲对应关系
+DIM_WEIGHTS = {
+    "事业": {
+        # 事业看官杀、印星、财星
+        "正官": 9, "偏官": 5, "正印": 7, "偏印": 4,
+        "正财": 6, "偏财": 5, "食神": 3, "伤官": 2,
+        "比肩": 1, "劫财": -2,
+    },
+    "财运": {
+        # 财运看财星、食伤生财
+        "正财": 9, "偏财": 8, "食神": 6, "伤官": 5,
+        "正官": 3, "偏官": 1, "正印": 1, "偏印": 0,
+        "比肩": -1, "劫财": -4,
+    },
+    "姻缘": {
+        # 男命看正财（妻）、偏财（情缘）；女命看正官（夫）、偏官（情缘）
+        # 统一用中性权重，由调用时根据性别调整
+        "正财": 5, "偏财": 3, "正官": 5, "偏官": 3,
+        "食神": 2, "伤官": -1, "正印": 2, "偏印": 0,
+        "比肩": -1, "劫财": -3,
+    },
+    "健康": {
+        # 健康看印星护身、比劫帮身，财星耗身、官杀克身不利
+        "正印": 8, "偏印": 6, "比肩": 5, "劫财": 3,
+        "食神": 3, "伤官": 0, "正财": -1, "偏财": -1,
+        "正官": -1, "偏官": -3,
+    },
+    "学业": {
+        # 学业看印星（主文）、食伤（主智慧）
+        "正印": 9, "偏印": 7, "食神": 6, "伤官": 5,
+        "正官": 3, "偏官": 1, "正财": -2, "偏财": -3,
+        "比肩": 1, "劫财": -1,
+    },
+    "人际": {
+        # 人际看比劫（朋友）、食神（福禄亲和）、印星（贵人）
+        "食神": 8, "正印": 6, "偏印": 3, "比肩": 5,
+        "正官": 3, "偏官": -2, "正财": 2, "偏财": 1,
+        "伤官": -3, "劫财": -4,
+    },
+    "子女": {
+        # 男命看官杀（子女），女命看食伤（子女）
+        # 统一中性权重，由调用时根据性别调整
+        "正官": 5, "偏官": 4, "食神": 5, "伤官": 4,
+        "正印": 3, "偏印": 1, "正财": 1, "偏财": 0,
+        "比肩": 0, "劫财": -2,
+    },
+    "精神": {
+        # 精神/心态：食神主福禄乐观，印星主安定，偏官主压力
+        "食神": 9, "正印": 7, "偏印": 3, "比肩": 4,
+        "正财": 3, "偏财": 2, "伤官": -2, "正官": 1,
+        "偏官": -5, "劫财": -3,
+    },
+}
+
+# 各维度的中文说明
+DIM_DESC = {
+    "事业": "事业发展与职业运",
+    "财运": "财富积累与理财运",
+    "姻缘": "感情婚姻与伴侣缘",
+    "健康": "身体健康与精力",
+    "学业": "学业智慧与进修运",
+    "人际": "人际关系与贵人运",
+    "子女": "子女缘分与亲子关系",
+    "精神": "心态幸福与精神状态",
+}
+
+
+def calc_dimension_scores(bazi, gender, birth_year, da_yun_list, start_age, years=100):
+    """
+    计算八大维度的综合评分（1-5分）。
+    综合考量：命局原局十神分布 + 大运十神影响 + 长生旺衰。
+    """
+    day_gan = bazi[2][0]
+    month_gz = bazi[1]
+
+    # 1. 命局原局十神分布（四柱天干 + 地支藏干）
+    all_gans = []
+    for pillar in bazi:
+        all_gans.append(pillar[0])  # 天干
+        for cg in CANG_GAN.get(pillar[1], []):
+            all_gans.append(cg)
+
+    # 统计原局十神
+    natal_shi_shen = {}
+    for g in all_gans:
+        if g == day_gan:
+            continue
+        ss = get_shi_shen(day_gan, g)
+        natal_shi_shen[ss] = natal_shi_shen.get(ss, 0) + 1
+
+    # 2. 大运十神统计（加权平均，前期大运权重更高）
+    dy_shi_shen_weighted = {}
+    total_dy_weight = 0
+    for idx, dy_gz in enumerate(da_yun_list[:8]):  # 前80年
+        dy_weight = max(1, 8 - idx)  # 早期大运权重更高
+        dy_ss = get_shi_shen(day_gan, dy_gz[0])
+        dy_shi_shen_weighted[dy_ss] = dy_shi_shen_weighted.get(dy_ss, 0) + dy_weight
+        total_dy_weight += dy_weight
+
+    # 3. 大运地支长生平均分
+    dy_cs_total = sum(get_chang_sheng_score(day_gan, dy_gz[1]) for dy_gz in da_yun_list[:8])
+    dy_cs_avg = dy_cs_total / min(8, len(da_yun_list))
+
+    # 4. 根据性别调整姻缘/子女维度权重
+    dim_weights_adjusted = {}
+    for dim, weights in DIM_WEIGHTS.items():
+        if dim == "姻缘":
+            w = dict(weights)
+            if gender == "男":
+                w["正财"] = 9  # 男命妻星
+                w["偏财"] = 5
+                w["正官"] = 2
+                w["偏官"] = 0
+            else:
+                w["正官"] = 9  # 女命夫星
+                w["偏官"] = 5
+                w["正财"] = 2
+                w["偏财"] = 0
+            dim_weights_adjusted[dim] = w
+        elif dim == "子女":
+            w = dict(weights)
+            if gender == "男":
+                w["正官"] = 8  # 男命子女看官杀
+                w["偏官"] = 7
+                w["食神"] = 2
+                w["伤官"] = 1
+            else:
+                w["食神"] = 8  # 女命子女看食伤
+                w["伤官"] = 7
+                w["正官"] = 2
+                w["偏官"] = 1
+            dim_weights_adjusted[dim] = w
+        else:
+            dim_weights_adjusted[dim] = weights
+
+    # 5. 计算各维度原始分
+    dim_scores = {}
+    for dim, weights in dim_weights_adjusted.items():
+        raw = 0
+
+        # 原局贡献 (40%)
+        natal_sum = 0
+        for ss, count in natal_shi_shen.items():
+            natal_sum += weights.get(ss, 0) * count
+        raw += natal_sum * 0.4
+
+        # 大运贡献 (40%)
+        dy_sum = 0
+        for ss, w in dy_shi_shen_weighted.items():
+            dy_sum += weights.get(ss, 0) * w / total_dy_weight
+        raw += dy_sum * 5 * 0.4  # 缩放到可比范围
+
+        # 长生旺衰贡献 (20%) —— 旺相利健康/事业，衰绝不利
+        cs_factor = (dy_cs_avg - 5) * 1.5
+        raw += cs_factor * 0.2
+
+        dim_scores[dim] = raw
+
+    # 6. 绝对键定归一化到 1-5 分
+    # 基于经验校准：原始分范围约 0~31，中位约12
+    # 以中位映射到 3.0 星，每 6 分代表 1 星差距
+    result = {}
+    for dim, raw in dim_scores.items():
+        normalized = 1.0 + (raw / 7.5)  # 0→ 1.0, 7.5→2.0, 15→3.0, 22.5→4.0, 30→5.0
+        # 圆整到 0.5 步长
+        score = round(normalized * 2) / 2
+        score = max(1.0, min(5.0, score))
+        result[dim] = score
+
+    return result
+
+
+def detect_highlight_years(timeline, top_n=5):
+    """
+    检测高能年份：包括峰值、谷值、大运转折、最大单年涨跌。
+    返回列表，每项含 (year, age, type, description)。
+    """
+    if not timeline:
+        return []
+
+    highlights = []
+
+    # 找峰值和谷值
+    sorted_by_high = sorted(timeline, key=lambda x: x["high"], reverse=True)
+    sorted_by_low = sorted(timeline, key=lambda x: x["low"])
+
+    # 最高峰
+    peak = sorted_by_high[0]
+    highlights.append({
+        "year": peak["year"], "age": peak["age"],
+        "type": "人生巅峰", "emoji": "⭐",
+        "desc": f"{peak['year']}年({peak['age']}岁) 大运{peak['da_yun']} 流年{peak['liu_nian']}\n"
+                f"运势达到最高点 {peak['high']}，人生资源与机遇的黄金窗口。"
+    })
+
+    # 最低谷
+    valley = sorted_by_low[0]
+    highlights.append({
+        "year": valley["year"], "age": valley["age"],
+        "type": "人生低谷", "emoji": "⚠️",
+        "desc": f"{valley['year']}年({valley['age']}岁) 大运{valley['da_yun']} 流年{valley['liu_nian']}\n"
+                f"运势降至最低点 {valley['low']}，需谨慎行事、韬光养晦。"
+    })
+
+    # 大运转折点
+    for i in range(1, len(timeline)):
+        if timeline[i]["da_yun"] != timeline[i-1]["da_yun"]:
+            item = timeline[i]
+            change = item["close"] - item["open"]
+            direction = "上行" if change > 0 else "下行"
+            highlights.append({
+                "year": item["year"], "age": item["age"],
+                "type": "大运转换", "emoji": "🔄",
+                "desc": f"{item['year']}年({item['age']}岁) 进入大运{item['da_yun']}\n"
+                        f"运势转向{direction}（{change:+.1f}），人生方向可能发生转变。"
+            })
+
+    # 最大单年涨幅
+    max_gain = max(timeline[1:], key=lambda x: x["close"] - x["open"])
+    gain = max_gain["close"] - max_gain["open"]
+    if gain > 3:
+        highlights.append({
+            "year": max_gain["year"], "age": max_gain["age"],
+            "type": "最大涨幅", "emoji": "🚀",
+            "desc": f"{max_gain['year']}年({max_gain['age']}岁) 大运{max_gain['da_yun']} 流年{max_gain['liu_nian']}\n"
+                    f"单年涨幅 {gain:+.1f}，运势急剧上升的爆发年。"
+        })
+
+    # 最大单年跌幅
+    max_loss = min(timeline[1:], key=lambda x: x["close"] - x["open"])
+    loss = max_loss["close"] - max_loss["open"]
+    if loss < -3:
+        highlights.append({
+            "year": max_loss["year"], "age": max_loss["age"],
+            "type": "最大跌幅", "emoji": "⚡",
+            "desc": f"{max_loss['year']}年({max_loss['age']}岁) 大运{max_loss['da_yun']} 流年{max_loss['liu_nian']}\n"
+                    f"单年跌幅 {loss:+.1f}，需特别注意防范风险。"
+        })
+
+    # 按年份排序，去重
+    seen_years = set()
+    unique = []
+    for h in sorted(highlights, key=lambda x: x["year"]):
+        if h["year"] not in seen_years:
+            seen_years.add(h["year"])
+            unique.append(h)
+
+    return unique
+
+
+def generate_structured_summary(bazi, gender, timeline, dim_scores, highlights):
+    """
+    生成结构化的命理总结数据（供 AI 解读用）。
+    返回 dict，包含：
+    - bazi_summary: 八字概要
+    - life_phases: 人生阶段划分
+    - dim_scores: 多维度评分
+    - highlights: 高能年份
+    - statistics: 统计数据
+    """
+    day_gan = bazi[2][0]
+    wu_xing = WU_XING_GAN[day_gan]
+    yin_yang = YIN_YANG_GAN[day_gan]
+
+    # 人生阶段划分
+    phases = [
+        {"name": "少年期", "range": "1-18岁", "ages": (1, 18)},
+        {"name": "青年期", "range": "19-35岁", "ages": (19, 35)},
+        {"name": "壮年期", "range": "36-55岁", "ages": (36, 55)},
+        {"name": "中年期", "range": "56-70岁", "ages": (56, 70)},
+        {"name": "晚年期", "range": "71岁+", "ages": (71, 200)},
+    ]
+
+    phase_data = []
+    for phase in phases:
+        items = [t for t in timeline if phase["ages"][0] <= t["age"] <= phase["ages"][1]]
+        if not items:
+            continue
+        avg_close = sum(t["close"] for t in items) / len(items)
+        bull_count = sum(1 for t in items if t["close"] >= t["open"])
+        bear_count = len(items) - bull_count
+        peak_in_phase = max(items, key=lambda x: x["high"])
+        # 评级
+        if avg_close >= 70:
+            rating = "大牛市"
+        elif avg_close >= 60:
+            rating = "牛市"
+        elif avg_close >= 50:
+            rating = "震荡"
+        elif avg_close >= 40:
+            rating = "熊市"
+        else:
+            rating = "大熊市"
+
+        phase_data.append({
+            "name": phase["name"],
+            "range": phase["range"],
+            "avg_score": round(avg_close, 1),
+            "rating": rating,
+            "bull_years": bull_count,
+            "bear_years": bear_count,
+            "peak_year": peak_in_phase["year"],
+            "peak_score": peak_in_phase["high"],
+        })
+
+    # 统计数据
+    all_close = [t["close"] for t in timeline]
+    stats = {
+        "total_years": len(timeline),
+        "avg_score": round(sum(all_close) / len(all_close), 1),
+        "max_score": round(max(t["high"] for t in timeline), 1),
+        "min_score": round(min(t["low"] for t in timeline), 1),
+        "bull_years": sum(1 for t in timeline if t["close"] >= t["open"]),
+        "bear_years": sum(1 for t in timeline if t["close"] < t["open"]),
+    }
+
+    return {
+        "bazi_summary": {
+            "four_pillars": " ".join(bazi),
+            "day_master": f"{day_gan}({yin_yang}{wu_xing})",
+            "gender": gender,
+        },
+        "life_phases": phase_data,
+        "dim_scores": dim_scores,
+        "dim_desc": DIM_DESC,
+        "highlights": highlights,
+        "statistics": stats,
+    }
 
 
 # ============================================================
@@ -764,6 +1142,33 @@ def main():
     # 生成时间线
     timeline = generate_timeline(bazi, gender, birth_year, years=args.years)
 
+    # 计算大运序列（多维度评分需要）
+    year_gan = bazi[0][0]
+    month_gz = bazi[1]
+    is_yang = YIN_YANG_GAN[year_gan] == "阳"
+    is_male = gender == "男"
+    if (is_yang and is_male) or (not is_yang and not is_male):
+        dy_start_age = 3
+    else:
+        dy_start_age = 5
+    da_yun_list = calc_da_yun(year_gan, month_gz, gender, count=12)
+
+    # 多维度评分
+    dim_scores = calc_dimension_scores(bazi, gender, birth_year, da_yun_list, dy_start_age)
+    print(f"\n🎯 多维度评分：")
+    for dim, score in dim_scores.items():
+        stars = "★" * int(score) + ("½" if score % 1 else "")
+        print(f"  {dim}: {score}/5 {stars}")
+
+    # 高能年份检测
+    highlights = detect_highlight_years(timeline)
+    print(f"\n📍 高能年份: {len(highlights)}个")
+    for h in highlights:
+        print(f"  {h['emoji']} [{h['type']}] {h['year']}年({h['age']}岁)")
+
+    # 结构化总结
+    summary = generate_structured_summary(bazi, gender, timeline, dim_scores, highlights)
+
     # 输出数据
     result = {
         "name": name,
@@ -772,11 +1177,12 @@ def main():
         "bazi": bazi,
         "birth_year": birth_year,
         "timeline": timeline,
+        "summary": summary,
     }
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"✅ 数据已保存至 {args.output}")
+    print(f"\n✅ 数据已保存至 {args.output}")
 
     # 生成HTML
     html_path = generate_html(result, name=name, output_path=args.html)
