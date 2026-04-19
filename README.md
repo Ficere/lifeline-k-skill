@@ -58,7 +58,7 @@ git clone https://github.com/Ficere/lifeline-k-skill.git
 
 | 模块 | 说明 |
 |------|------|
-| **八字排盘** | 四柱八字自动校验（内置儒略日算法计算日柱） |
+| **四柱自动排盘** | 年月日时四柱全自动计算（天文算法节气 + JDN 日柱 + 五虎/五鼠遁元） |
 | **大运推算** | 根据年干阴阳和性别，顺/逆推 10+ 步大运 |
 | **逐年评分** | 综合十神关系、长生十二诀、地支合冲的 6 维评分模型 |
 | **OHLC 生成** | 运势分数 → 开盘/收盘/最高/最低，模拟真实K线波动 |
@@ -79,6 +79,8 @@ git clone https://github.com/Ficere/lifeline-k-skill.git
 | 大运流年交互 | ±3 | 天干之间的十神关系 |
 | 地支合冲 | ±4~5 | 六合加分、六冲扣分 |
 
+v2.0 新增四柱自动计算，节气基于 USNO 天文算法 + UTC+8，采用早子时方案。
+
 最终分值钳制在 5-95 范围内。详见 `references/algorithm.md`。
 
 </details>
@@ -94,19 +96,28 @@ python scripts/lifeline_k.py --input data.json --output result.json --html chart
 <details>
 <summary>输入 JSON 示例 / Sample input</summary>
 
+最简输入（四柱自动计算）：
+```json
+{
+  "name": "张三",
+  "gender": "男",
+  "solar_date": "1990-05-20",
+  "birth_time": "08:30"
+}
+```
+
+带校验输入（提供 bazi 则逐柱对比）：
 ```json
 {
   "name": "张三",
   "gender": "男",
   "solar_date": "1990-05-20",
   "birth_time": "08:30",
-  "bazi": ["庚午", "辛巳", "乙酉", "庚辰"],
-  "lunar_month": 4,
-  "lunar_day": 26
+  "bazi": ["庚午", "辛巳", "乙酉", "庚辰"]
 }
 ```
 
-> 日柱由脚本自动校验，如与输入不一致会自动修正并提示。
+> 四柱全部自动计算。如提供 bazi 字段，脚本会逐柱校验并提示差异。
 
 </details>
 

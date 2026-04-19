@@ -6,20 +6,18 @@
 用法：
   python lifeline_k.py --input data.json --output result.json --html chart.html
 
-输入JSON格式：
+输入JSON格式（完整四柱自动计算，bazi 为可选校验项）：
 {
   "name": "张三",
   "gender": "男",
   "solar_date": "1990-05-20",
-  "birth_time": "08:30",
-  "bazi": ["庚午", "辛巳", "乙酉", "庚辰"],
-  "lunar_month": 4,
-  "lunar_day": 26
+  "birth_time": "08:30"
 }
 
 说明：
-- bazi 为四柱八字（年柱、月柱、日柱、时柱），日柱可由脚本自动校验
-- birth_time 为真太阳时
+- 只需 solar_date 和 birth_time，脚本自动计算完整四柱八字
+- 如提供 bazi 字段，脚本会对比校验并提示差异
+- birth_time 为出生时间（24小时制），建议使用真太阳时
 - 脚本使用确定性算法（非AI），基于五行旺衰、大运流年、十神关系推算运势
 """
 
@@ -95,6 +93,154 @@ def calc_day_pillar(year, month, day):
     gan_idx = (base_gan + diff) % 10
     zhi_idx = (base_zhi + diff) % 12
     return TIAN_GAN[gan_idx] + DI_ZHI[zhi_idx]
+
+
+# ============================================================
+# 节气计算 —— 天文算法（USNO 简化太阳位置 + UTC+8）
+# 精度约 0.01°，节气日期计算与紫金山天文台数据一致
+# ============================================================
+
+# 24节气对应的太阳黄经（度）
+SOLAR_TERM_LONGITUDES = [
+    285, 300, 315, 330, 345, 0,      # 小寒 大寒 立春 雨水 惊蛰 春分
+    15, 30, 45, 60, 75, 90,          # 清明 谷雨 立夏 小满 芒种 夏至
+    105, 120, 135, 150, 165, 180,    # 小暑 大暑 立秋 处暑 白露 秋分
+    195, 210, 225, 240, 255, 270,    # 寒露 霜降 立冬 小雪 大雪 冬至
+]
+
+
+def _sun_longitude(jd):
+    """太阳地心视黄经（度）。jd 为儒略日（含小数）。"""
+    D = jd - 2451545.0
+    g = math.radians((357.529 + 0.98560028 * D) % 360)
+    q = (280.459 + 0.98564736 * D) % 360
+    return (q + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g)) % 360
+
+
+def _jdn_to_gregorian(jdn):
+    """儒略日数转公历。"""
+    l = jdn + 68569
+    n = 4 * l // 146097
+    l = l - (146097 * n + 3) // 4
+    i = 4000 * (l + 1) // 1461001
+    l = l - 1461 * i // 4 + 31
+    j = 80 * l // 2447
+    day = l - 2447 * j // 80
+    l = j // 11
+    month = j + 2 - 12 * l
+    year = 100 * (n - 49) + i + l
+    return year, month, day
+
+
+def _find_solar_term_jd(year, target_lon):
+    """牛顿迭代求解太阳黄经达到 target_lon 的 JD（UT）。"""
+    # 估算初始 JD
+    base_jd = gregorian_to_jdn(year, 3, 20) + 0.5
+    if target_lon >= 270:
+        if target_lon >= 285:
+            base_jd = gregorian_to_jdn(year, 1, 6) + 0.5 + (target_lon - 285) * 365.25 / 360.0
+        else:
+            base_jd = gregorian_to_jdn(year, 12, 22) + 0.5
+    else:
+        base_jd += (target_lon % 360) * 365.25 / 360.0
+
+    jd = base_jd
+    for _ in range(50):
+        lon = _sun_longitude(jd)
+        diff = (lon - target_lon + 180) % 360 - 180
+        if abs(diff) < 0.0001:
+            break
+        jd -= diff / 0.9856
+    return jd
+
+
+def calc_solar_term_day(year, term_idx):
+    """计算某年某节气的公历日期（北京时间）。返回 (month, day)。"""
+    target_lon = SOLAR_TERM_LONGITUDES[term_idx]
+    jd_ut = _find_solar_term_jd(year, target_lon)
+    jd_beijing = jd_ut + 8.0 / 24.0  # UTC+8
+    jdn = int(jd_beijing + 0.5)
+    _, m, d = _jdn_to_gregorian(jdn)
+    return (m, d)
+
+
+def get_jie_qi_for_month(year, month):
+    """获取某月的“节”（月首节气）日期。"""
+    jie_map = {1: 0, 2: 2, 3: 4, 4: 6, 5: 8, 6: 10,
+               7: 12, 8: 14, 9: 16, 10: 18, 11: 20, 12: 22}
+    return calc_solar_term_day(year, jie_map[month])
+
+
+# ============================================================
+# 年柱计算（以立春为界）
+# ============================================================
+
+def calc_year_pillar(year, month, day):
+    """计算年柱。立春前属上一年。"""
+    lc_month, lc_day = calc_solar_term_day(year, 2)  # 立春
+    nian = year - 1 if (month < lc_month or (month == lc_month and day < lc_day)) else year
+    return TIAN_GAN[(nian - 4) % 10] + DI_ZHI[(nian - 4) % 12]
+
+
+# ============================================================
+# 月柱计算（以节气为界 + 五虎遁元）
+# ============================================================
+
+def calc_month_pillar(year, month, day):
+    """计算月柱。以12个“节”为月份分界。"""
+    # 每月的“节”对应的干支月地支
+    # 1月小寒->丑(1), 2月立春->寅(2), ..., 12月大雪->子(0)
+    month_to_zhi = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6,
+                    7: 7, 8: 8, 9: 9, 10: 10, 11: 11, 12: 0}
+    # 上一个干支月地支
+    prev_month_zhi = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5,
+                      7: 6, 8: 7, 9: 8, 10: 9, 11: 10, 12: 11}
+
+    _, jie_day = get_jie_qi_for_month(year, month)
+
+    if day >= jie_day:
+        month_zhi_idx = month_to_zhi[month]
+    else:
+        month_zhi_idx = prev_month_zhi[month]
+
+    year_pillar = calc_year_pillar(year, month, day)
+    year_gan_idx = TIAN_GAN.index(year_pillar[0])
+
+    # 五虎遁元: 寅月天干起始
+    yin_month_gan_start = (year_gan_idx % 5) * 2 + 2
+    month_offset = (month_zhi_idx - 2) % 12
+    month_gan_idx = (yin_month_gan_start + month_offset) % 10
+
+    return TIAN_GAN[month_gan_idx] + DI_ZHI[month_zhi_idx]
+
+
+# ============================================================
+# 时柱计算（五鼠遁元 + 早子时方案）
+# ============================================================
+
+def calc_hour_pillar(day_gan, hour):
+    """计算时柱。采用早子时方案（23点不换日）。"""
+    shi_zhi_idx = 0 if hour == 23 else (hour + 1) // 2
+    day_gan_idx = TIAN_GAN.index(day_gan)
+    zi_hour_gan_start = (day_gan_idx % 5) * 2
+    shi_gan_idx = (zi_hour_gan_start + shi_zhi_idx) % 10
+    return TIAN_GAN[shi_gan_idx] + DI_ZHI[shi_zhi_idx]
+
+
+# ============================================================
+# 完整四柱自动计算
+# ============================================================
+
+def calc_four_pillars(year, month, day, hour=12):
+    """
+    自动计算完整四柱八字。
+    采用早子时方案：23点仍用当日日柱。
+    """
+    year_p = calc_year_pillar(year, month, day)
+    month_p = calc_month_pillar(year, month, day)
+    day_p = calc_day_pillar(year, month, day)
+    hour_p = calc_hour_pillar(day_p[0], hour)
+    return [year_p, month_p, day_p, hour_p]
 
 
 # ============================================================
@@ -593,16 +739,26 @@ def main():
     name = data.get("name", "")
     gender = data.get("gender", "男")
     solar_date = data["solar_date"]
-    bazi = data["bazi"]
+    birth_time = data.get("birth_time", "12:00")
 
-    # 自动校验日柱
     parts = solar_date.split("-")
     s_year, s_month, s_day = int(parts[0]), int(parts[1]), int(parts[2])
-    computed_day = calc_day_pillar(s_year, s_month, s_day)
-    if bazi[2] != computed_day:
-        print(f"⚠️ 输入日柱「{bazi[2]}」与计算结果「{computed_day}」不一致，已自动修正")
-        bazi[2] = computed_day
+    time_parts = birth_time.split(":")
+    s_hour = int(time_parts[0])
 
+    # 自动计算完整四柱
+    computed_bazi = calc_four_pillars(s_year, s_month, s_day, s_hour)
+    print(f"✨ 自动计算四柱: {' '.join(computed_bazi)}")
+
+    # 如果用户提供了 bazi，逐柱对比校验
+    user_bazi = data.get("bazi")
+    if user_bazi:
+        pillar_names = ["年柱", "月柱", "日柱", "时柱"]
+        for i, (comp, user) in enumerate(zip(computed_bazi, user_bazi)):
+            if comp != user:
+                print(f"⚠️ {pillar_names[i]}: 输入「{user}」与计算「{comp}」不一致，已用计算结果")
+
+    bazi = computed_bazi
     birth_year = s_year
 
     # 生成时间线
